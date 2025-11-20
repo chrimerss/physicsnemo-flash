@@ -104,3 +104,24 @@ singularity exec --nv \
 ```
 
 **Note:** Ensure that the paths in `config/config.yaml` match the mount points inside the container. For example, if you mount data to `/data`, update `dataset.zarr_path` and `dataset.aux_path` accordingly.
+
+## Distributed Training
+
+To run on multiple GPUs (e.g., all available GPUs on a node), use `torchrun`.
+
+**Inside Singularity:**
+
+```bash
+# Example: Run on 4 GPUs
+torchrun --nproc_per_node=4 train.py training.loss="regression"
+```
+
+**Or directly with Singularity exec:**
+
+```bash
+singularity exec --nv \
+  -B $(pwd):/workspace \
+  -B /home/users/li1995/global_flood/FLASH/data:/data \
+  physicsnemo.sif \
+  bash -c "cd /workspace && torchrun --nproc_per_node=\$(nvidia-smi -L | wc -l) train.py training.loss='regression'"
+```
