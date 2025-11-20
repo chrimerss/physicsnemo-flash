@@ -16,7 +16,7 @@
 
 # Network architecture
 net:
-  _target_: physicsnemo.models.stormcast.StormCastUNet
+  _target_: physicsnemo.models.diffusion.StormCastUNet
   in_channels: 20 # 8 background + 12 state input (6 precip + 6 streamflow)
   out_channels: 6 # 6 streamflow output
   base_channels: 64
