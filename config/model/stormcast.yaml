@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2025 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Network architecture
+net:
+  _target_: physicsnemo.models.stormcast.StormCastUNet
+  in_channels: 20 # 8 background + 12 state input (6 precip + 6 streamflow)
+  out_channels: 6 # 6 streamflow output
+  base_channels: 64
+  num_layers: 4
+  # Add other parameters as needed based on PhysicsNemo implementation
+
+# Diffusion parameters (only used for diffusion training)
+diffusion:
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+  
+# Regression weights path (for diffusion training)
+regression_weights: null
