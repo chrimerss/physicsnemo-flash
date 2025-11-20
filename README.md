@@ -77,3 +77,30 @@ Run unit tests to verify data loading:
 ```bash
 python test_dataset.py
 ```
+
+## Running with Singularity
+
+If you are using Singularity, you can run the training scripts as follows. Assumes you have the `physicsnemo` image (e.g., `physicsnemo.sif`).
+
+You need to bind the directories containing your code and data.
+
+```bash
+# Interactive shell
+singularity shell --nv -B /path/to/physicsnemo-flash:/workspace -B /home/users/li1995/global_flood/FLASH/data:/data physicsnemo.sif
+
+# Inside the container
+cd /workspace
+python train.py training.loss="regression"
+```
+
+Or run directly:
+
+```bash
+singularity exec --nv \
+  -B $(pwd):/workspace \
+  -B /home/users/li1995/global_flood/FLASH/data:/data \
+  physicsnemo.sif \
+  bash -c "cd /workspace && python train.py training.loss='regression'"
+```
+
+**Note:** Ensure that the paths in `config/config.yaml` match the mount points inside the container. For example, if you mount data to `/data`, update `dataset.zarr_path` and `dataset.aux_path` accordingly.
