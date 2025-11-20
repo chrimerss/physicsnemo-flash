@@ -36,7 +36,7 @@ from src.vis import validation_plot
 # Assuming we can import from examples.weather.stormcast.utils
 # If not, we will need to copy utils.nn
 try:
-    from examples.weather.stormcast.utils.nn import (
+    from utils.nn import (
         diffusion_model_forward,
         regression_loss_fn,
         get_preconditioned_architecture,
@@ -48,7 +48,7 @@ except ImportError:
     # To make it work, I might need to add the project root to python path.
     import sys
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..")))
-    from examples.weather.stormcast.utils.nn import (
+    from utils.nn import (
         diffusion_model_forward,
         regression_loss_fn,
         get_preconditioned_architecture,
