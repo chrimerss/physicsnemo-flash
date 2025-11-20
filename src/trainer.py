@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hydra
 import os
 import time
 import numpy as np
@@ -202,10 +203,10 @@ def training_loop(cfg):
     # For simplicity, I'll use hydra.utils.instantiate(cfg.net) but I need to set channels.
     
     # Update cfg.net params
-    cfg.net.in_channels = num_condition_channels
+    cfg.model.net.in_channels = num_condition_channels
     # Out channels is 6 (streamflow)
     
-    net = hydra.utils.instantiate(cfg.net)
+    net = hydra.utils.instantiate(cfg.model.net)
     net.train().requires_grad_(True).to(device)
 
     # Setup loss function.
