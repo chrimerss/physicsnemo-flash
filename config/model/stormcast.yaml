@@ -17,9 +17,10 @@
 # Network architecture
 net:
   _target_: physicsnemo.models.diffusion.StormCastUNet
-  in_channels: 20 # 8 background + 12 state input (6 precip + 6 streamflow)
-  out_channels: 6 # 6 streamflow output
-  base_channels: 64
+  img_in_channels: 20 # 8 background + 12 state input (6 precip + 6 streamflow)
+  img_out_channels: 6 # 6 streamflow output
+  model_channels: 64
+  img_resolution: [1024, 1024]
   num_layers: 4
   # Add other parameters as needed based on PhysicsNemo implementation
 

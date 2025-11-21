@@ -203,7 +203,7 @@ def training_loop(cfg):
     # For simplicity, I'll use hydra.utils.instantiate(cfg.net) but I need to set channels.
     
     # Update cfg.net params
-    cfg.model.net.in_channels = num_condition_channels
+    cfg.model.net.img_in_channels = num_condition_channels
     # Out channels is 6 (streamflow)
     
     net = hydra.utils.instantiate(cfg.model.net)
