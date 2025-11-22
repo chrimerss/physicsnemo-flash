@@ -21,7 +21,6 @@ net:
   img_out_channels: 6 # 6 streamflow output
   model_channels: 64
   img_resolution: [1024, 1024]
-  num_layers: 4
   # Add other parameters as needed based on PhysicsNemo implementation
 
 # Diffusion parameters (only used for diffusion training)
