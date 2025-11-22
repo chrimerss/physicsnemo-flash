@@ -279,13 +279,10 @@ def training_loop(cfg):
             target = state_target - reg_out
             
         # Forward & Loss
-        if net_name == "regression":
-            pred = net(condition)
-            loss = loss_fn(pred, target)
-        else:
-            # EDM Loss
-            # loss_fn(net, images, condition, ...)
-            loss = loss_fn(net, target, condition)
+        # Forward & Loss
+        # Both regression_loss_fn and EDMLoss now support the same signature
+        # loss_fn(net, images, condition, ...)
+        loss = loss_fn(net, target, condition).mean()
             
         loss.backward()
         optimizer.step()
