@@ -20,19 +20,19 @@ import wandb
 import io
 from PIL import Image
 
-def validation_plot(generated, truth, field_name):
+def validation_plot(generated, truth, field_name, vmin=None, vmax=None):
     """
     Create a side-by-side comparison plot.
     """
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     
     # Plot Generated
-    im0 = axes[0].imshow(generated, cmap='viridis')
+    im0 = axes[0].imshow(generated, cmap='viridis', vmin=vmin, vmax=vmax)
     axes[0].set_title(f"Generated {field_name}")
     plt.colorbar(im0, ax=axes[0])
     
     # Plot Truth
-    im1 = axes[1].imshow(truth, cmap='viridis')
+    im1 = axes[1].imshow(truth, cmap='viridis', vmin=vmin, vmax=vmax)
     axes[1].set_title(f"Truth {field_name}")
     plt.colorbar(im1, ax=axes[1])
     
@@ -44,7 +44,7 @@ def validation_plot(generated, truth, field_name):
     
     return fig
 
-def create_video(predictions, targets, field_name="streamflow"):
+def create_video(predictions, targets, field_name="streamflow", vmin=None, vmax=None):
     """
     Create a video from a sequence of predictions and targets.
     predictions: (T, H, W)
@@ -54,7 +54,7 @@ def create_video(predictions, targets, field_name="streamflow"):
     T = predictions.shape[0]
     
     for t in range(T):
-        fig = validation_plot(predictions[t], targets[t], f"{field_name} t={t}")
+        fig = validation_plot(predictions[t], targets[t], f"{field_name} t={t}", vmin=vmin, vmax=vmax)
         
         # Convert plot to image
         buf = io.BytesIO()

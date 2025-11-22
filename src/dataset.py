@@ -404,7 +404,7 @@ class FlashDataset(StormCastDataset):
 
     def background_channels(self) -> List[str]:
         return [
-            'dem', 'fdir', 'facc', 'ksat', 'wm', 'b', 'lat', 'lon'
+            'b', 'dem', 'facc', 'fdir', 'im', 'ksat', 'wm', 'lat', 'lon'
         ]
 
     def state_channels(self) -> List[str]:
