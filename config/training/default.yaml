@@ -25,3 +25,4 @@ log_to_wandb: true
 wandb_mode: "online"
 rundir: "outputs"
 initial_weights: null
+accumulate_grad_batches: 1

@@ -252,9 +252,16 @@ def training_loop(cfg):
     logger0.info(f"Starting training...")
     done = total_steps >= total_train_steps
     
+    # Gradient accumulation
+    accumulate_grad_batches = cfg.training.get('accumulate_grad_batches', 1)
+    logger0.info(f"Accumulating gradients over {accumulate_grad_batches} batches.")
+    
+    optimizer.zero_grad()
+    
+    # We need to track micro-steps for accumulation
+    micro_step = 0
+    
     while not done:
-        optimizer.zero_grad()
-        
         batch = next(dataset_iterator)
         # unpack_batch expects dict with 'background', 'state', 'lead_time_label'
         # My dataset returns this dict.
@@ -296,124 +303,139 @@ def training_loop(cfg):
             target = state_target - reg_out
             
         # Forward & Loss
-        # Forward & Loss
         # Both regression_loss_fn and EDMLoss now support the same signature
         # loss_fn(net, images, condition, ...)
         loss = loss_fn(net, target, condition).mean()
-            
-        loss.backward()
-        optimizer.step()
         
-        # Logging
-        if total_steps % 100 == 0 and dist.rank == 0:
-            logger0.info(f"Step {total_steps}: Loss {loss.item()}")
-            if log_to_wandb:
-                wandb.log({"loss": loss.item()}, step=total_steps)
-                
-        # Validation
-        if total_steps % cfg.training.validation_freq == 0:
-            # Run validation
-            logger0.info(f"Running validation at step {total_steps}...")
-            net.eval()
-            with torch.no_grad():
-                try:
-                    val_batch = next(valid_dataset_iterator)
-                except StopIteration:
-                    valid_dataset_iterator = iter(valid_data_loader)
-                    val_batch = next(valid_dataset_iterator)
-                
-                val_bg = val_batch['background'].to(device)
-                val_state = val_batch['state']
-                val_state_input = val_state[0].to(device)
-                val_state_target = val_state[1].to(device)
-                
-                # Build condition
-                val_cond_tensors = []
-                if "state" in condition_list:
-                    val_cond_tensors.append(val_state_input)
-                if "background" in condition_list:
-                    val_cond_tensors.append(val_bg)
-                
-                # Regression part for validation
-                if "regression" in condition_list:
-                     val_reg_input = torch.cat([val_state_input, val_bg], dim=1)
-                     val_reg_out = regression_net(val_reg_input)
-                     val_cond_tensors.append(val_reg_out)
-                else:
-                    val_reg_out = None
+        # Scale loss for accumulation
+        loss = loss / accumulate_grad_batches
+        loss.backward()
+        
+        micro_step += 1
+        
+        # Optimizer step
+        if micro_step % accumulate_grad_batches == 0:
+            optimizer.step()
+            optimizer.zero_grad()
+            
+            # Logging (only on step)
+            if total_steps % 100 == 0 and dist.rank == 0:
+                # We log the accumulated loss? Or the current batch loss?
+                # Usually we want the average loss over the accumulation steps.
+                # But here 'loss' is already scaled. So loss * accumulate_grad_batches is the batch loss.
+                # Let's log the scaled loss * accumulation to show "effective" batch loss approx.
+                current_loss = loss.item() * accumulate_grad_batches
+                logger0.info(f"Step {total_steps}: Loss {current_loss}")
+                if log_to_wandb:
+                    wandb.log({"loss": current_loss}, step=total_steps)
                     
-                val_condition = torch.cat(val_cond_tensors, dim=1)
-                
-                # Forward
-                val_pred = net(val_condition)
-                
-                # Compute Loss
-
-                val_loss = loss_fn(net, val_state_target, val_condition).mean()
-                
-                logger0.info(f"Validation Loss: {val_loss.item()}")
-                if log_to_wandb and dist.rank == 0:
-                    wandb.log({"val_loss": val_loss.item()}, step=total_steps)
+            # Validation (only on step)
+            if total_steps % cfg.training.validation_freq == 0:
+                # Run validation
+                logger0.info(f"Running validation at step {total_steps}...")
+                net.eval()
+                with torch.no_grad():
+                    try:
+                        val_batch = next(valid_dataset_iterator)
+                    except StopIteration:
+                        valid_dataset_iterator = iter(valid_data_loader)
+                        val_batch = next(valid_dataset_iterator)
                     
-                    # Log images/video
-                    # We want to log denormalized streamflow
-                    # Model output is normalized streamflow (for regression)
-                    # For diffusion, it's residual, so we need to add regression output back
+                    val_bg = val_batch['background'].to(device)
+                    val_state = val_batch['state']
+                    val_state_input = val_state[0].to(device)
+                    val_state_target = val_state[1].to(device)
                     
-                    if net_name == "regression":
-                        pred_flow = val_pred
-                        target_flow = val_state_target
+                    # Build condition
+                    val_cond_tensors = []
+                    if "state" in condition_list:
+                        val_cond_tensors.append(val_state_input)
+                    if "background" in condition_list:
+                        val_cond_tensors.append(val_bg)
+                    
+                    # Regression part for validation
+                    if "regression" in condition_list:
+                         val_reg_input = torch.cat([val_state_input, val_bg], dim=1)
+                         val_reg_out = regression_net(val_reg_input)
+                         val_cond_tensors.append(val_reg_out)
                     else:
-                        # Diffusion prediction is residual
-                        # To get full flow: pred_flow = reg_out + pred_residual
-                        # But wait, diffusion model predicts score or noise usually?
-                        # If using EDMLoss, the net output depends on parameterization.
-                        # Assuming standard regression-like output for now or skip if complex.
-                        # Let's focus on regression as per current context.
-                        pred_flow = val_pred # Placeholder if diffusion logic differs
-                        target_flow = val_target
+                        val_reg_out = None
                         
-                    # Denormalize
-                    # We need to construct full state to use denormalize_state
-                    # State: Precip (6) + Streamflow (6)
-                    # We have input precip in val_state_input[:, :6]
+                    val_condition = torch.cat(val_cond_tensors, dim=1)
                     
-                    # Construct predicted state
-                    # (B, 12, H, W)
-                    pred_state = torch.cat([val_state_input[:, :6], pred_flow], dim=1)
-                    target_state = torch.cat([val_state_input[:, :6], target_flow], dim=1)
+                    # Forward
+                    val_pred = net(val_condition)
                     
-                    # Denormalize
-                    pred_state_denorm = dataset_train.denormalize_state(pred_state)
-                    target_state_denorm = dataset_train.denormalize_state(target_state)
+                    # Compute Loss
+    
+                    val_loss = loss_fn(net, val_state_target, val_condition).mean()
                     
-                    # Extract streamflow (last 6 channels)
-                    # (B, 6, H, W)
-                    pred_flow_denorm = pred_state_denorm[:, 6:]
-                    target_flow_denorm = target_state_denorm[:, 6:]
-                    
-                    # Take first sample in batch
-                    # (6, H, W)
-                    pred_seq = pred_flow_denorm[0].cpu().numpy()
-                    target_seq = target_flow_denorm[0].cpu().numpy()
-                    
-                    # Log video
-                    # Range [0, 4]
-                    video = create_video(pred_seq, target_seq, field_name="streamflow", vmin=0, vmax=4)
-                    wandb.log({"val_video": video}, step=total_steps)
-
-            net.train()
-            
-        # Checkpoint
-        if total_steps % cfg.training.checkpoint_freq == 0 and dist.rank == 0:
-            save_checkpoint(
-                path=ckpt_path,
-                models=net,
-                optimizer=optimizer,
-                epoch=total_steps
-            )
-            
-        total_steps += 1
-        done = total_steps >= total_train_steps
+                    logger0.info(f"Validation Loss: {val_loss.item()}")
+                    if log_to_wandb and dist.rank == 0:
+                        wandb.log({"val_loss": val_loss.item()}, step=total_steps)
+                        
+                        # Log images/video
+                        # We want to log denormalized streamflow
+                        # Model output is normalized streamflow (for regression)
+                        # For diffusion, it's residual, so we need to add regression output back
+                        
+                        if net_name == "regression":
+                            pred_flow = val_pred
+                            target_flow = val_state_target
+                        else:
+                            # Diffusion prediction is residual
+                            # To get full flow: pred_flow = reg_out + pred_residual
+                            # But wait, diffusion model predicts score or noise usually?
+                            # If using EDMLoss, the net output depends on parameterization.
+                            # Assuming standard regression-like output for now or skip if complex.
+                            # Let's focus on regression as per current context.
+                            pred_flow = val_pred # Placeholder if diffusion logic differs
+                            target_flow = val_target
+                            
+                        # Denormalize
+                        # We need to construct full state to use denormalize_state
+                        # State: Precip (6) + Streamflow (6)
+                        # We have input precip in val_state_input[:, :6]
+                        
+                        # Construct predicted state
+                        # (B, 12, H, W)
+                        pred_state = torch.cat([val_state_input[:, :6], pred_flow], dim=1)
+                        target_state = torch.cat([val_state_input[:, :6], target_flow], dim=1)
+                        
+                        # Denormalize
+                        pred_state_denorm = dataset_train.denormalize_state(pred_state)
+                        target_state_denorm = dataset_train.denormalize_state(target_state)
+                        
+                        # Extract streamflow (last 6 channels)
+                        # (B, 6, H, W)
+                        pred_flow_denorm = pred_state_denorm[:, 6:]
+                        target_flow_denorm = target_state_denorm[:, 6:]
+                        
+                        # Take first sample in batch
+                        # (6, H, W)
+                        pred_seq = pred_flow_denorm[0].cpu().numpy()
+                        target_seq = target_flow_denorm[0].cpu().numpy()
+                        
+                        # Log video
+                        # Range [0, 4]
+                        video = create_video(pred_seq, target_seq, field_name="streamflow", vmin=0, vmax=4)
+                        wandb.log({"val_video": video}, step=total_steps)
+    
+                net.train()
+                
+            # Checkpoint
+            if total_steps % cfg.training.checkpoint_freq == 0 and dist.rank == 0:
+                # Convert cfg to primitive to avoid serialization issues
+                cfg_primitive = OmegaConf.to_container(cfg, resolve=True)
+                save_checkpoint(
+                    path=ckpt_path,
+                    models=net,
+                    optimizer=optimizer,
+                    epoch=total_steps,
+                    cfg=cfg_primitive
+                )
+                
+            total_steps += 1
+            done = total_steps >= total_train_steps
 
     logger0.info("Training finished.")
