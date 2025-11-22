@@ -145,7 +145,7 @@ def training_loop(cfg):
         sampler=sampler,
         worker_init_fn=worker_init,
         drop_last=True,
-        pin_memory=torch.cuda.is_available(),
+        pin_memory=False,
     )
     valid_data_loader = torch.utils.data.DataLoader(
         dataset=dataset_valid,
@@ -153,7 +153,7 @@ def training_loop(cfg):
         num_workers=cfg.dataset.num_workers,
         sampler=valid_sampler,
         drop_last=True,
-        pin_memory=torch.cuda.is_available(),
+        pin_memory=False,
     )
 
     dataset_iterator = iter(data_loader)

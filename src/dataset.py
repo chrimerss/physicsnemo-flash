@@ -16,6 +16,7 @@
 
 import os
 import glob
+import json
 import numpy as np
 import torch
 import zarr
@@ -192,9 +193,10 @@ class FlashDataset(StormCastDataset):
         self.patch_size = params.get('patch_size', 1024)
         
         # Load auxiliary data
+        # User specified order: b, dem, facc, fdir, im, ksat, wm
         self.aux_files = [
-            'dem_usa.tif', 'fdir_usa.tif', 'facc_usa.tif', 
-            'ksat_usa.tif', 'wm_usa.tif', 'b_usa.tif'
+            'b_usa.tif', 'dem_usa.tif', 'facc_usa.tif', 'fdir_usa.tif', 
+            'im_usa.tif', 'ksat_usa.tif', 'wm_usa.tif'
         ]
         self.aux_data = self._load_aux_data()
         
@@ -204,9 +206,87 @@ class FlashDataset(StormCastDataset):
         # Since I don't have lat/lon grids, I will generate normalized coordinates.
         self.lat_grid, self.lon_grid = self._generate_lat_lon_grid()
         
+        # Load stats
+        with open('stats.json', 'r') as f:
+            self.stats = json.load(f)
+            
         # Combine background
         # Aux (6) + Lat (1) + Lon (1) = 8 channels
         self.background_data = np.concatenate([self.aux_data, self.lat_grid, self.lon_grid], axis=0)
+        
+        # Normalize background immediately (since it's static)
+        # Aux mapping: 
+        # The stats.json has 7 aux channels, but we have 6 files.
+        # For now, we will assume the order in 'aux_files' matches the first 6 in 'stats' 
+        # but we must be careful. 
+        # Let's apply normalization channel by channel if possible.
+        # Since we don't have the mapping, we will use the first 6 stats for the 6 files.
+        # TODO: Verify aux channel mapping!
+        
+        self.aux_stats = self.stats['aux']
+        for i, fname in enumerate(self.aux_files):
+            if 'fdir' in fname:
+                continue
+            mean = self.aux_stats[i]['mean']
+            std = self.aux_stats[i]['std']
+            self.background_data[i] = (self.background_data[i] - mean) / std
+            
+        # Lat/Lon are already -1 to 1, so we don't normalize them further or we treat them as is.
+        
+    def _normalize(self, x, mean, std):
+        return (x - mean) / std
+
+    def _denormalize(self, x, mean, std):
+        return x * std + mean
+
+    def normalize_state(self, x: torch.Tensor) -> torch.Tensor:
+        # State: Precip (6) + Streamflow (6)
+        # x shape: (12, H, W) or (B, 12, H, W)
+        
+        # Precip stats
+        p_mean = self.stats['precip']['mean']
+        p_std = self.stats['precip']['std']
+        
+        # Streamflow stats
+        q_mean = self.stats['unitq']['mean']
+        q_std = self.stats['unitq']['std']
+        
+        # Normalize precip (first 6 channels)
+        x_precip = self._normalize(x[..., :6, :, :], p_mean, p_std)
+        
+        # Normalize streamflow (last 6 channels)
+        x_flow = self._normalize(x[..., 6:, :, :], q_mean, q_std)
+        
+        return torch.cat([x_precip, x_flow], dim=-3)
+
+    def denormalize_state(self, x: torch.Tensor) -> torch.Tensor:
+        # Precip stats
+        p_mean = self.stats['precip']['mean']
+        p_std = self.stats['precip']['std']
+        
+        # Streamflow stats
+        q_mean = self.stats['unitq']['mean']
+        q_std = self.stats['unitq']['std']
+        
+        # Denormalize precip
+        x_precip = self._denormalize(x[..., :6, :, :], p_mean, p_std)
+        
+        # Denormalize streamflow
+        x_flow = self._denormalize(x[..., 6:, :, :], q_mean, q_std)
+        
+        return torch.cat([x_precip, x_flow], dim=-3)
+        
+    def denormalize_background(self, x: torch.Tensor) -> torch.Tensor:
+        # Aux (6) + Lat (1) + Lon (1)
+        # We only normalized the first 6
+        out = x.clone()
+        for i, fname in enumerate(self.aux_files):
+             if 'fdir' in fname:
+                 continue
+             mean = self.aux_stats[i]['mean']
+             std = self.aux_stats[i]['std']
+             out[..., i, :, :] = self._denormalize(x[..., i, :, :], mean, std)
+        return out
         
     def _load_aux_data(self):
         aux_data = []
@@ -275,6 +355,18 @@ class FlashDataset(StormCastDataset):
         # Streamflow: -9999 -> 0
         streamflow_input[streamflow_input == -9999] = 0
         streamflow_target[streamflow_target == -9999] = 0
+        
+        # Normalize
+        # Precip
+        p_mean = self.stats['precip']['mean']
+        p_std = self.stats['precip']['std']
+        precip_seq = self._normalize(precip_seq, p_mean, p_std)
+        
+        # Streamflow
+        q_mean = self.stats['unitq']['mean']
+        q_std = self.stats['unitq']['std']
+        streamflow_input = self._normalize(streamflow_input, q_mean, q_std)
+        streamflow_target = self._normalize(streamflow_target, q_mean, q_std)
         
         # Concatenate inputs
         # State input: Precip (6) + Streamflow (6) = 12 channels
