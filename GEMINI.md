@@ -63,7 +63,7 @@ Target dimension: (6,1024,1024) which is the unit streamflow for the next half h
 
 Data logging: use wandb and plot results as video (see src/vis.py).
 
-NOTE: if you want to test any implementation, please use python environment from /home/users/li1995/global_flood/FLASH/env/bin/python3
+NOTE: if you want to test any implementation, please use singularity with command: singularity exec --nv -B "$(pwd)":/workspace -B "$(pwd)/data":/data /home/users/li1995/global_flood/physicsnemo-flash/physicsnemo_25.11.sif bash -c "torchrun train.py training.loss=regression"
 
 ## Instruction
 

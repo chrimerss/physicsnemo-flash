@@ -256,6 +256,9 @@ def training_loop(cfg):
     accumulate_grad_batches = cfg.training.get('accumulate_grad_batches', 1)
     logger0.info(f"Accumulating gradients over {accumulate_grad_batches} batches.")
     
+    # Initialize GradScaler for AMP
+    scaler = torch.amp.GradScaler('cuda')
+    
     optimizer.zero_grad()
     
     # We need to track micro-steps for accumulation
@@ -269,6 +272,7 @@ def training_loop(cfg):
         state = batch['state']
         state_input = state[0].to(device)
         state_target = state[1].to(device)
+        mask = batch['mask'].to(device)
         lead_time_label = None
         
         # Build condition
@@ -282,40 +286,62 @@ def training_loop(cfg):
             cond_tensors.append(state_input)
         if "background" in condition_list:
             cond_tensors.append(background)
-        if "regression" in condition_list:
-             # Run regression net
-             with torch.no_grad():
-                 # Regression net input: State + Background
-                 # Assuming regression net was trained with [state, background]
-                 reg_input = torch.cat([state_input, background], dim=1)
-                 reg_out = regression_net(reg_input)
-                 cond_tensors.append(reg_out)
-        else:
-            reg_out = None
-            
-        condition = torch.cat(cond_tensors, dim=1)
         
-        # Target
-        if net_name == "regression":
-            target = state_target
-        else:
-            # Diffusion target is residual
-            target = state_target - reg_out
+        # Use autocast for forward pass and loss computation
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
+            if "regression" in condition_list:
+                 # Run regression net
+                 with torch.no_grad():
+                     # Regression net input: State + Background
+                     # Assuming regression net was trained with [state, background]
+                     reg_input = torch.cat([state_input, background], dim=1)
+                     reg_out = regression_net(reg_input)
+                     cond_tensors.append(reg_out)
+            else:
+                reg_out = None
+                
+            condition = torch.cat(cond_tensors, dim=1)
             
-        # Forward & Loss
-        # Both regression_loss_fn and EDMLoss now support the same signature
-        # loss_fn(net, images, condition, ...)
-        loss = loss_fn(net, target, condition).mean()
+            # Target
+            if net_name == "regression":
+                target = state_target
+            else:
+                # Diffusion target is residual
+                target = state_target - reg_out
+                
+            # Forward & Loss
+            # Both regression_loss_fn and EDMLoss now support the same signature
+            # loss_fn(net, images, condition, ...)
+            loss_pixel = loss_fn(net, target, condition)
+            
+            # Apply mask
+            loss_masked = loss_pixel * mask
+            
+            # Compute mean over valid pixels
+            # Sum over all dims, divide by sum of mask
+            # Note: mask is (B, 6, H, W). loss_pixel is (B, 6, H, W).
+            loss_mean = loss_masked.sum() / (mask.sum() + 1e-6)
+            
+            # Scale loss for accumulation
+            loss = loss_mean / accumulate_grad_batches
         
-        # Scale loss for accumulation
-        loss = loss / accumulate_grad_batches
-        loss.backward()
+        # Backward with scaler
+        scaler.scale(loss).backward()
         
         micro_step += 1
         
         # Optimizer step
         if micro_step % accumulate_grad_batches == 0:
-            optimizer.step()
+            # Unscale gradients before clipping
+            scaler.unscale_(optimizer)
+
+            # Clip gradients
+            grad_clip = getattr(cfg.training, 'grad_clip', 1.0)
+            clip_grad_norm_(net.parameters(), grad_clip)
+            
+            # Step with scaler
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad()
             
             # Logging (only on step)
@@ -345,6 +371,7 @@ def training_loop(cfg):
                     val_state = val_batch['state']
                     val_state_input = val_state[0].to(device)
                     val_state_target = val_state[1].to(device)
+                    val_mask = val_batch['mask'].to(device)
                     
                     # Build condition
                     val_cond_tensors = []
@@ -368,7 +395,9 @@ def training_loop(cfg):
                     
                     # Compute Loss
     
-                    val_loss = loss_fn(net, val_state_target, val_condition).mean()
+                    val_loss_pixel = loss_fn(net, val_state_target, val_condition)
+                    val_loss_masked = val_loss_pixel * val_mask
+                    val_loss = val_loss_masked.sum() / (val_mask.sum() + 1e-6)
                     
                     logger0.info(f"Validation Loss: {val_loss.item()}")
                     if log_to_wandb and dist.rank == 0:
@@ -432,7 +461,6 @@ def training_loop(cfg):
                     models=net,
                     optimizer=optimizer,
                     epoch=total_steps,
-                    cfg=cfg_primitive
                 )
                 
             total_steps += 1

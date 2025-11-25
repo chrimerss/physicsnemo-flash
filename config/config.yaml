@@ -26,7 +26,7 @@ dataset:
   output_window: 6
   patch_size: 1024
   batch_size: 1 # Adjust based on GPU memory
-  num_workers: 16
+  num_workers: 0
 
 hydra:
   run:

@@ -140,6 +140,7 @@ class FlashDataset(StormCastDataset):
         # Data paths
         self.zarr_path = params.zarr_path
         self.aux_path = params.aux_path
+        self.epsilon = params.get('epsilon', 1e-5)
         
         # Open Zarr store
         self.ds = zarr.open_group(self.zarr_path, mode='r')
@@ -172,8 +173,10 @@ class FlashDataset(StormCastDataset):
         # Val: 157680 to 210384
         # Test: 210384 to end
         
-        self.train_end_idx = 157680
-        self.val_end_idx = 210384
+        # self.train_end_idx = 157680
+        # self.val_end_idx = 210384
+        self.train_end_idx=100000
+        self.val_end_idx=157680
         
         if self.train:
             self.start_idx = 0
@@ -238,6 +241,43 @@ class FlashDataset(StormCastDataset):
 
     def _denormalize(self, x, mean, std):
         return x * std + mean
+        
+    def _normalize_log(self, x, mean, std, valid_mask=None):
+        # Apply log1p(x/eps) then normalize
+        # x is modified in place if possible
+        out = x.copy()
+        if valid_mask is None:
+            valid_mask = np.ones_like(x, dtype=bool)
+            
+        # Log transform valid values
+        # x[valid_mask] should be >= 0 (handled by caller)
+        out[valid_mask] = np.log1p(out[valid_mask] / self.epsilon)
+        
+        # Standardize
+        out[valid_mask] = (out[valid_mask] - mean) / std
+        
+        # Invalid values set to 0.0 (mean)
+        out[~valid_mask] = 0.0
+        return out
+
+    def _denormalize_log(self, x, mean, std):
+        # Inverse of _normalize_log
+        # x is tensor here usually
+        if isinstance(x, torch.Tensor):
+            xp = torch
+        else:
+            xp = np
+            
+        # Destandardize
+        out = x * std + mean
+        
+        # Inverse log: expm1(x) * eps
+        if isinstance(x, torch.Tensor):
+            out = torch.expm1(out) * self.epsilon
+        else:
+            out = np.expm1(out) * self.epsilon
+            
+        return out
 
     def normalize_state(self, x: torch.Tensor) -> torch.Tensor:
         # State: Precip (6) + Streamflow (6)
@@ -251,13 +291,29 @@ class FlashDataset(StormCastDataset):
         q_mean = self.stats['unitq']['mean']
         q_std = self.stats['unitq']['std']
         
-        # Normalize precip (first 6 channels)
-        x_precip = self._normalize(x[..., :6, :, :], p_mean, p_std)
+        # We assume x coming here is already log-transformed if we use this for validation?
+        # Actually, stormcast pipeline might call this.
+        # If x is "physical units", we need to apply log transform.
+        # BUT, this method is usually used by the model wrapper or for plotting?
+        # If it's used on model output (which is normalized), we need denormalize_state.
+        # This method normalize_state is likely used if we want to re-normalize external data.
         
-        # Normalize streamflow (last 6 channels)
-        x_flow = self._normalize(x[..., 6:, :, :], q_mean, q_std)
+        # Let's implement it assuming x is physical units (>=0).
+        # We don't have mask here easily, assuming all valid?
         
-        return torch.cat([x_precip, x_flow], dim=-3)
+        # Log transform
+        x_precip = x[..., :6, :, :]
+        x_flow = x[..., 6:, :, :]
+        
+        # Apply log transform (assuming valid data)
+        x_precip_log = torch.log1p(x_precip / self.epsilon)
+        x_flow_log = torch.log1p(x_flow / self.epsilon)
+        
+        # Normalize
+        x_precip_norm = (x_precip_log - p_mean) / p_std
+        x_flow_norm = (x_flow_log - q_mean) / q_std
+        
+        return torch.cat([x_precip_norm, x_flow_norm], dim=-3)
 
     def denormalize_state(self, x: torch.Tensor) -> torch.Tensor:
         # Precip stats
@@ -269,10 +325,10 @@ class FlashDataset(StormCastDataset):
         q_std = self.stats['unitq']['std']
         
         # Denormalize precip
-        x_precip = self._denormalize(x[..., :6, :, :], p_mean, p_std)
+        x_precip = self._denormalize_log(x[..., :6, :, :], p_mean, p_std)
         
         # Denormalize streamflow
-        x_flow = self._denormalize(x[..., 6:, :, :], q_mean, q_std)
+        x_flow = self._denormalize_log(x[..., 6:, :, :], q_mean, q_std)
         
         return torch.cat([x_precip, x_flow], dim=-3)
         
@@ -349,24 +405,29 @@ class FlashDataset(StormCastDataset):
         # Target streamflow
         streamflow_target = self.streamflow[target_start:target_end] # (6, H, W)
         
-        # Handle missing values
-        # Precip: -3 -> 0 (or some other value)
-        precip_seq[precip_seq == -3] = 0
-        # Streamflow: -9999 -> 0
-        streamflow_input[streamflow_input == -9999] = 0
-        streamflow_target[streamflow_target == -9999] = 0
+        # Create mask for target (1 for valid, 0 for -9999)
+        target_mask = (streamflow_target != -9999).astype(np.float32)
         
-        # Normalize
+        # Handle normalization and transforms
+        
         # Precip
+        # Mask: > -3
+        p_mask = precip_seq > -3
         p_mean = self.stats['precip']['mean']
         p_std = self.stats['precip']['std']
-        precip_seq = self._normalize(precip_seq, p_mean, p_std)
+        precip_seq = self._normalize_log(precip_seq, p_mean, p_std, p_mask)
         
-        # Streamflow
+        # Streamflow Input
+        # Mask: >= 0 (since -9999 is nodata)
+        q_in_mask = streamflow_input >= 0
         q_mean = self.stats['unitq']['mean']
         q_std = self.stats['unitq']['std']
-        streamflow_input = self._normalize(streamflow_input, q_mean, q_std)
-        streamflow_target = self._normalize(streamflow_target, q_mean, q_std)
+        streamflow_input = self._normalize_log(streamflow_input, q_mean, q_std, q_in_mask)
+        
+        # Streamflow Target
+        # Mask: >= 0
+        q_out_mask = streamflow_target >= 0
+        streamflow_target = self._normalize_log(streamflow_target, q_mean, q_std, q_out_mask)
         
         # Concatenate inputs
         # State input: Precip (6) + Streamflow (6) = 12 channels
@@ -393,13 +454,15 @@ class FlashDataset(StormCastDataset):
         background_crop = self.background_data[:, y_start:y_end, x_start:x_end]
         state_input_crop = state_input[:, y_start:y_end, x_start:x_end]
         state_target_crop = state_target[:, y_start:y_end, x_start:x_end]
+        target_mask_crop = target_mask[:, y_start:y_end, x_start:x_end]
         
         return {
             "background": torch.from_numpy(background_crop).float(),
             "state": (
                 torch.from_numpy(state_input_crop).float(),
                 torch.from_numpy(state_target_crop).float()
-            )
+            ),
+            "mask": torch.from_numpy(target_mask_crop).float()
         }
 
     def background_channels(self) -> List[str]:
